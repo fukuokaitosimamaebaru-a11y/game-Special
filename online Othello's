@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Othello SOGO HOUSE WiFi</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        :root { --main: #2e7d32; --dark: #1b5e20; --size: 98vmin; --cell: calc(var(--size) / 8); }
+        body { margin: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #000; overflow: hidden; touch-action: none; user-select: none; font-family: sans-serif; }
+        #menu, #p2p-menu { position: fixed; inset: 0; background: #1a1a1a; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; gap: 20px; color: white; }
+        .btn { width: 240px; padding: 20px; font-size: 1.4rem; cursor: pointer; background: var(--main); border: none; color: white; border-radius: 12px; font-weight: bold; }
+        #game-view { display: none; }
+        #board { display: grid; grid-template-columns: repeat(8, var(--cell)); grid-template-rows: repeat(8, var(--cell)); background: var(--dark); }
+        .cell { width: var(--cell); height: var(--cell); background: var(--main); border: 0.5px solid var(--dark); display: flex; justify-content: center; align-items: center; }
+        .stone { width: 88%; height: 88%; border-radius: 50%; }
+        .black { background: #000; } .white { background: #fff; }
+        #status { position: fixed; top: 10px; color: white; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+    <div id="status">OFFLINE</div>
+
+    <div id="menu">
+        <button class="btn" onclick="start('ai')">VS AI</button>
+        <button class="btn" onclick="start('local')">VS 人間</button>
+        <button class="btn" style="background:#00695c" onclick="showP2P()">Wi-Fi内対戦</button>
+    </div>
+
+    <div id="p2p-menu" style="display:none">
+        <div id="my-id-display">IDを取得中...</div>
+        <button class="btn" onclick="hostRoom()">部屋を作る</button>
+        <hr style="width:240px; border:0.5px solid #444">
+        <input type="text" id="join-id" placeholder="相手のIDを入力" style="width:220px; padding:10px; border-radius:8px; border:none;">
+        <button class="btn" onclick="joinRoom()">参加する</button>
+        <button class="btn" style="background:#444" onclick="location.reload()">戻る</button>
+    </div>
+
+    <div id="game-view">
+        <div id="board"></div>
+    </div>
+
+    <script>
+        let board = [], curP = 1, mode = '', myColor = 1, peer, conn, timer;
+        const boardEl = document.getElementById('board'), menuEl = document.getElementById('menu'), p2pEl = document.getElementById('p2p-menu'), gameView = document.getElementById('game-view'), statusEl = document.getElementById('status');
+
+        // 長押しリセット
+        window.oncontextmenu = (e) => e.preventDefault();
+        window.addEventListener('mousedown', () => timer = setTimeout(() => confirm("リセット？") && location.reload(), 1000));
+        window.addEventListener('touchstart', () => timer = setTimeout(() => confirm("リセット？") && location.reload(), 1000));
+        window.addEventListener('mouseup', () => clearTimeout(timer));
+        window.addEventListener('touchend', () => clearTimeout(timer));
+
+        function showP2P() {
+            menuEl.style.display = 'none';
+            p2pEl.style.display = 'flex';
+            peer = new Peer();
+            peer.on('open', id => { document.getElementById('my-id-display').innerText = "自分のID: " + id; });
+            peer.on('connection', c => {
+                conn = c;
+                myColor = 1; // ホストは黒
+                setupConn();
+            });
+        }
+
+        function hostRoom() { alert("相手にIDを教えて、参加を待ってください"); }
+        function joinRoom() {
+            const id = document.getElementById('join-id').value;
+            if(!id) return alert("IDを入力してください");
+            conn = peer.connect(id);
+            myColor = 2; // ゲストは白
+            setupConn();
+        }
+
+        function setupConn() {
+            conn.on('open', () => {
+                statusEl.innerText = "CONNECTED: " + (myColor === 1 ? "黒" : "白");
+                start('p2p');
+            });
+            conn.on('data', data => {
+                if(data.type === 'move') exec(data.r, data.c, getF(data.r, data.c, data.p));
+            });
+        }
+
+        function start(m) {
+            mode = m;
+            menuEl.style.display = p2pEl.style.display = 'none';
+            gameView.style.display = 'block';
+            init();
+        }
+
+        function init() {
+            board = Array(8).fill().map(() => Array(8).fill(0));
+            board[3][3] = 2; board[3][4] = 1; board[4][3] = 1; board[4][4] = 2;
+            curP = 1; draw();
+        }
+
+        function draw() {
+            boardEl.innerHTML = '';
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<8; c++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.onclick = () => tap(r, c);
+                    if(board[r][c] !== 0) {
+                        const s = document.createElement('div');
+                        s.className = `stone ${board[r][c]===1?'black':'white'}`;
+                        cell.appendChild(s);
+                    }
+                    boardEl.appendChild(cell);
+                }
+            }
+            if(mode === 'ai' && curP === 2) setTimeout(ai, 500);
+        }
+
+        function tap(r, c) {
+            if(mode === 'p2p' && curP !== myColor) return;
+            if(mode === 'ai' && curP === 2) return;
+            const f = getF(r, c, curP);
+            if(board[r][c] !== 0 || f.length === 0) return;
+            if(mode === 'p2p') conn.send({type: 'move', r, c, p: curP});
+            exec(r, c, f);
+        }
+
+        function exec(r, c, f) {
+            board[r][c] = curP;
+            f.forEach(([fr, fc]) => board[fr][fc] = curP);
+            curP = 3 - curP;
+            if(!can(curP)) curP = 3 - curP;
+            draw();
+        }
+
+        function ai() {
+            let m = [];
+            for(let r=0; r<8; r++) for(let c=0; c<8; c++) if(board[r][c] === 0) {
+                const f = getF(r, c, 2); if(f.length > 0) m.push({r, c, f});
+            }
+            if(m.length > 0) {
+                const t = m[Math.floor(Math.random() * m.length)];
+                exec(t.r, t.c, t.f);
+            }
+        }
+
+        function getF(r, c, p) {
+            const dirs = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+            let res = [];
+            dirs.forEach(([dr, dc]) => {
+                let t = [], cr = r+dr, cc = c+dc;
+                while(cr>=0 && cr<8 && cc>=0 && cc<8) {
+                    if(board[cr][cc] === 0) break;
+                    if(board[cr][cc] === p) { res = res.concat(t); break; }
+                    t.push([cr, cc]); cr += dr; cc += dc;
+                }
+            });
+            return res;
+        }
+
+        function can(p) {
+            for(let r=0; r<8; r++) for(let c=0; c<8; c++) 
+                if(board[r][c] === 0 && getF(r,c,p).length > 0) return true;
+            return false;
+        }
+    </script>
+</body>
+</html>
